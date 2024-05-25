@@ -1,0 +1,431 @@
+<!DOCTYPE html>
+<html lang='ja'>
+
+<head>
+  <meta charset="UTF-8">
+  <script type="text/javascript" src="./node_modules/amazon-connect-streams/release/connect-streams.js"></script>
+  <title>Amazon Connect Softphone Sample</title>
+</head>
+
+<body onload="init()">
+
+<div id="contact-type-bar"></div>
+<div id="status-bar" style="height: 50px; width: 100%; margin-bottom: 8px"></div>
+<div id="agent-status-bar"></div>
+<div id="agent-status-list" style="margin: 16px 0"></div>
+
+<div id="connecting-buttons" style="margin: 16px 0">
+  <p style="margin: 0;">通話確立前に操作できるボタン</p>
+  <button id="accept-button" onclick="accept()">着信を受信</button>
+  <button id="reject-button" onclick="reject()">通話接続中を終了</button>
+</div>
+
+<div id="connected-buttons" style="margin: 16px 0">
+  <p style="margin: 0;">通話確立後に操作できるボタン (二者通話)</p>
+  <div id="hold-status-bar"></div>
+  <div id="mute-status-bar"></div>
+  <button id="hold" onclick="hold()">保留</button>
+  <button id="resume" onclick="resume()">保留解除</button>
+  <button id="mute" onclick="mute()">ミュート</button>
+  <button id="unmute" onclick="unmute()">ミュート解除</button>
+  <button id="end-contact" onclick="endContact()">通話を終了</button>
+  <button id="contact-clear" onclick="contactClear()">コンタクトを閉じる</button>
+  <p style="margin-bottom: 0;">クイック接続 (未着信時に利用可能)</p>
+  <div id="quick-connections-for-no-connected"></div>
+  <p style="margin-bottom: 0;">クイック接続 (着信中に利用可能)</p>
+  <div id="quick-connections-for-connected"></div>
+  <p style="margin: 0;">通話確立後に操作できるボタン (三者通話)</p>
+  <button id="agent-hold" onclick="agentHold()">自分自身の通話を保留</button>
+  <button id="agent-resume" onclick="agentResume()">自分自身の通話を保留解除</button>
+  <button id="agent-destory" onclick="agentDestory()">自分自身の通話を切断</button>
+  <button id="initial-hold" onclick="initialHold()">顧客の通話を保留</button>
+  <button id="initial-resume" onclick="initialResume()">顧客の通話を保留解除</button>
+  <button id="initial-destroy" onclick="initialDestory()">顧客の通話を切断</button>
+  <button id="third-party-hold" onclick="thirdPartyHold()">転送先の通話を保留</button>
+  <button id="third-party-resume" onclick="thirdPartyResume()">転送先の通話を保留解除</button>
+  <button id="third-party-destroy" onclick="thirdPartyDestory()">転送先の通話を切断</button>
+</div>
+
+<div>電話番号は国際形式で入力してください: (例) +818012345678</div>
+<div style='display: flex;'>
+  <select id="queue-select-box"></select>
+  <input type="tel" id="phone" name="phone" required>
+  <button onclick="outbound()">発信</button>
+</div>
+
+<button onclick="logDownload()" style="margin-top: 8px;">CCP Logをダウンロード</button>
+
+<div 
+  id="container-div" 
+  style="width: 400px; height: 500px; margin-top: 32px;">
+</div>
+
+<script type="text/javascript">
+  var containerDiv = document.getElementById("container-div");
+
+  // 以下の形式のインスタンスURLを入力してください
+  // <インスタンス名>の部分は契約しているAmazon Connectのインスタンス名に置き換えてください
+  // https://<インスタンス名>.my.connect.aws/connect/ccp-v2
+  var instanceURL = false;
+  var agentObject;
+  var contactObject;
+
+  if (!instanceURL) {
+    window.alert('インスタンスURLが設定されていません')
+  }
+
+  function init() {
+    // CCPの初期化
+    connect.core.initCCP(containerDiv, {
+      ccpUrl: instanceURL,
+      loginPopup: true,
+      loginPopupAutoClose: true,
+      loginOptions: {
+        autoClose: true,
+        height: 600,
+        width: 400,
+        top: 0,
+        left: 0
+      },
+      region: "ap-northeast-1",
+      softphone: {
+        allowFramedSoftphone: true, // これを指定しないと応答に失敗する
+      },
+      pageOptions: {
+        enableAudioDeviceSettings: true,
+        enablePhoneTypeSettings: true,
+      },
+    });
+
+    connect.agent(async (agent) => {
+      agentObject = agent
+
+      agent.onRefresh((_agent) => {
+        const agentStatusName = _agent.getState().name
+        changeAgentStatusBar(agentStatusName)
+      })
+
+      agent.onMuteToggle(({ muted }) => {
+        document.getElementById('hold-status-bar').innerText = muted ? 'ミュート中' : ''
+      })
+    })
+
+    const bus = connect.core.getEventBus()
+    bus.subscribe(connect.AgentEvents.INIT, (data) => {
+      setAgentStatusList()
+      setQueueSelectBox()
+      setQuickConnections()
+    })
+
+    connect.contact(async (contact) => {
+      contactObject = contact
+
+      contact.onRefresh((_contact) => {
+        const contactStatus = _contact.getState().type
+        changeContactStatusBar(contactStatus, agentObject)
+        changeContactTypeBar(_contact.getType())
+      })
+    })
+  }
+
+  function getAgentStates() {
+    const agentStates = agentObject.getAgentStates()
+  }
+
+  function logDownload() {
+    const logger = connect.getLog()
+    logger.download({ logName: "test", filterByLogLevel: connect.LogLevel.INFO })
+  }
+
+  function outbound() {
+  const phoneNumber = document.getElementById('phone').value
+  const endpoint = connect.Endpoint.byPhoneNumber(phoneNumber)
+
+  // 発信時に利用するキューの選択
+  const selectBox = document.getElementById('queue-select-box')
+  const queueARN = selectBox.options[selectBox.selectedIndex].value
+
+  agentObject.connect(endpoint, {
+    queueARN: queueARN,
+    success: () => console.log('発信成功'),
+    failure: (error) => console.error('発信失敗: ', error),
+  })
+}
+
+  function contactReject() {
+    contactObject.reject()
+  }
+
+  function changeAgentStatusBar(agentStatus = connect.AgentStateType.INIT) {
+    const agentStatusBar = document.getElementById('agent-status-bar')
+    agentStatusBar.innerText = agentStatus
+  }
+
+  function changeContactStatusBar(contactStatus = connect.ContactStateType.INIT, agentObject) {
+    const statusBar = document.getElementById('status-bar')
+    switch(contactStatus) {
+      case connect.ContactStateType.INIT:
+        statusBar.style.backgroundColor = 'white'
+        statusBar.innerText = ''
+        break
+      case connect.ContactStateType.INCOMING:
+        statusBar.style.backgroundColor = 'green'
+        statusBar.innerText = 'Incoming'
+        break
+      case connect.ContactStateType.PENDING:
+        statusBar.style.backgroundColor = 'green'
+        statusBar.innerText = 'Pending'
+        break
+      case connect.ContactStateType.CONNECTING:
+        statusBar.style.backgroundColor = 'green'
+        statusBar.innerText = 'Connecting...'
+        break
+      case connect.ContactStateType.CONNECTED:
+        statusBar.style.backgroundColor = 'blue'
+        statusBar.innerText = 'Connected'
+        break
+      case connect.ContactStateType.MISSED:
+        statusBar.style.backgroundColor = 'red'
+        statusBar.innerText = 'Missed'
+        break
+      case connect.ContactStateType.ERROR:
+        statusBar.style.backgroundColor = 'red'
+        const errorMessage = agentObject.getState().name
+        statusBar.innerText = errorMessage
+        break
+      case connect.ContactStateType.ENDED:
+        statusBar.style.backgroundColor = 'gray'
+        statusBar.innerText = 'Ended'
+        break
+      case connect.ContactStateType.REJECTED:
+        statusBar.style.backgroundColor = 'red'
+        statusBar.innerText = 'Rejected'
+        break
+    }
+  }
+
+  function setAgentStatusList() {
+    const agentStates = agentObject.getAgentStates()
+
+    agentStates.forEach((agentState) => {
+      const agentStateListItem = document.createElement('button')
+      agentStateListItem.textContent = agentState.name
+      agentStateListItem.style.marginRight = '8px'
+      agentStateListItem.onclick = () => {
+        agentObject.setState(agentState)
+      }
+      document.getElementById('agent-status-list').appendChild(agentStateListItem)
+    })
+  }
+
+  function setQueueSelectBox() {
+    const routingProfile = agentObject.getRoutingProfile()
+    const queues = routingProfile.queues.filter((queue) => queue.name)
+
+    queues.forEach((queue) => {
+      const option = document.createElement('option')
+      option.text = queue.name
+      option.value = queue.queueARN
+
+      if (queue.queueARN === routingProfile.defaultOutboundQueue.queueARN) {
+        option.selected = true
+      }
+
+      document.getElementById('queue-select-box').appendChild(option)
+    })
+  }
+
+  function accept() {
+    contactObject.accept({
+      success: () => console.log('accept success'),
+      failure: (error) => console.error('accept failure: ', error),
+    })
+  }
+
+  function reject() {
+    contactObject.reject({
+      success: () => console.log('reject success'),
+      failure: (error) => console.error('reject failure: ', error),
+    })
+  }
+
+  function hold() {
+    const initialConnection = contactObject.getInitialConnection()
+    initialConnection.hold({
+      success: () => {
+        console.log('agentHold success')
+        document.getElementById('hold-status-bar').innerText = '保留中'
+      },
+      failure: (error) => console.error('initialConnectionHold failure: ', error),
+    })
+  }
+
+  function resume() {
+    const initialConnection = contactObject.getInitialConnection()
+    initialConnection.resume({
+      success: () => {
+        console.log('initialConnectionHold success')
+        document.getElementById('hold-status-bar').innerText = ''
+      },
+      failure: (error) => console.error('initialConnectionHold failure: ', error),
+    })
+  }
+
+  function mute() {
+    agentObject.mute()
+  }
+
+  function unmute() {
+    agentObject.unmute()
+  }
+
+  function endContact() {
+    const initialConnection = contactObject.getInitialConnection()
+    initialConnection.destroy({
+      success: () => console.log('endContact success'),
+      failure: (error) => console.error('endContact failure: ', error),
+    })
+  }
+
+  function contactClear() {
+    contactObject.clear({
+      success: () => console.log('contactClear success'),
+      failure: (error) => console.error('contactClear failure: ', error),
+    })
+  }
+
+  function setQuickConnections() {
+    const queueARNs = agentObject.getAllQueueARNs()
+    agentObject.getEndpoints(queueARNs, {
+      success: (data) => {
+        const phoneNumberEndpoints = data.endpoints.filter((endpoint) => {
+          return endpoint.type === connect.EndpointType.PHONE_NUMBER
+        })
+
+        phoneNumberEndpoints.forEach((endpoint) => {
+          const quickConnectionListItem = document.createElement('button')
+          quickConnectionListItem.textContent 
+            = `${endpoint.name} (${endpoint.phoneNumber})`
+          quickConnectionListItem.style.marginRight = '8px'
+          quickConnectionListItem.onclick = () => {
+            const routingProfile = agentObject.getRoutingProfile()
+            const defaultOutboundQueueARN = routingProfile.defaultOutboundQueue.queueARN
+
+            agentObject.connect(endpoint, {
+              queueARN: defaultOutboundQueueARN,
+              success: () => console.log('クイック接続成功'),
+              failure: (error) => console.error('クイック接続失敗: ', error),
+            })
+          }
+          document.getElementById('quick-connections-for-no-connected').appendChild(quickConnectionListItem)
+        })
+
+        data.endpoints.forEach((endpoint) => {
+          const quickConnectionListItem = document.createElement('button')
+          quickConnectionListItem.textContent = `${endpoint.name} (${endpoint.type}転送)`
+          quickConnectionListItem.style.marginRight = '8px'
+          quickConnectionListItem.onclick = () => {
+            contactObject.addConnection(endpoint, {
+              success: () => console.log('転送成功'),
+              failure: (error) => console.error('転送失敗: ', error),
+            })
+          }
+          document.getElementById('quick-connections-for-connected').appendChild(quickConnectionListItem)
+        })
+      },
+      failure: (error) => console.error('getEndpoints failure: ', error)
+    })
+  }
+
+  function agentHold () {
+    const agentConnection = contactObject.getAgentConnection()
+    agentConnection.hold({
+      success: () => console.log('agentHold success'),
+      failure: (error) => console.error('agentHold failure: ', error),
+    })
+  }
+
+  function agentResume () {
+    const agentConnection = contactObject.getAgentConnection()
+    agentConnection.resume({
+      success: () => console.log('agentResume success'),
+      failure: (error) => console.error('agentResume failure: ', error),
+    })
+  }
+
+  function agentDestory () {
+    const agentConnection = contactObject.getAgentConnection()
+    agentConnection.destroy({
+      success: () => console.log('agentDestory success'),
+      failure: (error) => console.error('agentDestory failure: ', error),
+    })
+  }
+
+  function initialHold () {
+    const initialConnection = contactObject.getInitialConnection()
+    initialConnection.hold({
+      success: () => console.log('initialHold success'),
+      failure: (error) => console.error('initialHold failure: ', error),
+    })
+  }
+
+  function initialResume () {
+    const initialConnection = contactObject.getInitialConnection()
+    initialConnection.resume({
+      success: () => console.log('initialResume success'),
+      failure: (error) => console.error('initialResume failure: ', error),
+    })
+  }
+
+  function initialDestory () {
+    const initialConnection = contactObject.getInitialConnection()
+    initialConnection.destroy({
+      success: () => console.log('initialDestory success'),
+      failure: (error) => console.error('initialDestory failure: ', error),
+    })
+  }
+
+  function thirdPartyHold () {
+    const thirdPartyConnection = contactObject.getSingleActiveThirdPartyConnection()
+    thirdPartyConnection.hold({
+      success: () => console.log('thirdPartyHold success'),
+      failure: (error) => console.error('thirdPartyHold failure: ', error),
+    })
+  }
+
+  function thirdPartyResume () {
+    const thirdPartyConnection = contactObject.getSingleActiveThirdPartyConnection()
+    thirdPartyConnection.resume({
+      success: () => console.log('thirdPartyResume success'),
+      failure: (error) => console.error('thirdPartyResume failure: ', error),
+    })
+  }
+
+  function thirdPartyDestory () {
+    const thirdPartyConnection = contactObject.getSingleActiveThirdPartyConnection()
+    thirdPartyConnection.destroy({
+      success: () => console.log('thirdPartyDestory success'),
+      failure: (error) => console.error('thirdPartyDestory failure: ', error),
+    })
+  }
+
+  function changeContactTypeBar(contactType) {
+    const contactTypeBar = document.getElementById('contact-type-bar')
+    switch(contactType) {
+      case connect.ContactType.VOICE:
+        contactTypeBar.innerText = 'Voice'
+        break
+      case connect.ContactType.QUEUE_CALLBACK:
+        contactTypeBar.innerText = 'Queue Callback'
+        break
+      case connect.ContactType.CHAT:
+        contactTypeBar.innerText = 'Chat'
+        break
+      case connect.ContactType.TASK:
+        contactTypeBar.innerText = 'Task'
+        break
+    }
+  }
+</script>
+</body>
+</html>

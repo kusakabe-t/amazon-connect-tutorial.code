@@ -1,0 +1,11 @@
+{
+  "scripts": {
+    "dev": "http-server . --port 8080"
+  },
+  "dependencies": {
+    "amazon-connect-streams": "2.13.1"
+  },
+  "devDependencies": {
+    "http-server": "14.1.1"
+  }
+}
